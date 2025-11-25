@@ -8,6 +8,8 @@ use bsp::entry;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::digital::OutputPin;
+use embedded_hal::i2c::I2c;
+use fugit::RateExtU32;
 use panic_probe as _;
 
 // Provide an alias for our BSP so we can switch targets quickly.
@@ -16,11 +18,13 @@ use rp_pico as bsp;
 // use sparkfun_pro_micro_rp2040 as bsp;
 
 use bsp::hal::{
-    clocks::{Clock, init_clocks_and_plls},
+    clocks::{init_clocks_and_plls, Clock},
     pac,
     sio::Sio,
     watchdog::Watchdog,
 };
+
+use si5351::Si5351; // pull in the Si5351 Trait
 
 #[entry]
 fn main() -> ! {
@@ -64,14 +68,73 @@ fn main() -> ! {
     // in series with the LED.
     let mut led_pin = pins.led.into_push_pull_output();
 
+    //
+    // I2C for SI5351 Clock Generator
+    //
+
+    let mut i2c = bsp::hal::I2C::i2c0(
+        pac.I2C0,
+        pins.gpio16.reconfigure(),
+        pins.gpio17.reconfigure(),
+        400.kHz(),
+        &mut pac.RESETS,
+        125_000_000.Hz(),
+    );
+
+    // Scan for devices on the bus by attempting to read from them
+    for i in 0..=127u8 {
+        let mut readbuf: [u8; 1] = [0; 1];
+        let result = i2c.read(i, &mut readbuf);
+        if result.is_ok() {
+            info!("i2c device found at address 0x{:02x}", i);
+        }
+    }
+
+    let mut clock = si5351::Si5351Device::new(i2c, false, 25_000_000);
+    clock.init(si5351::CrystalLoad::_10).unwrap();
+
+    clock.set_clock_enabled(si5351::ClockOutput::Clk0, false);
+    clock.set_clock_enabled(si5351::ClockOutput::Clk1, false);
+
+    let freq = 10_000_000;
+    let clk0_phase_offset: u8 = 0x00;
+    let mut clk1_phase_offset: u8 = 0x00;
+
+    clock
+        .set_frequency(si5351::PLL::A, si5351::ClockOutput::Clk0, freq)
+        .unwrap();
+    clock
+        .set_phase_offset(si5351::ClockOutput::Clk0, clk0_phase_offset)
+        .unwrap();
+    clock
+        .flush_clock_control(si5351::ClockOutput::Clk0)
+        .unwrap();
+    clock.set_clock_enabled(si5351::ClockOutput::Clk0, true);
+
     loop {
-        info!("on!");
+        clock.set_clock_enabled(si5351::ClockOutput::Clk1, false);
+        clock
+            .set_frequency(si5351::PLL::A, si5351::ClockOutput::Clk1, freq)
+            .unwrap();
+        clock
+            .set_phase_offset(si5351::ClockOutput::Clk1, clk1_phase_offset)
+            .unwrap();
+        clock
+            .flush_clock_control(si5351::ClockOutput::Clk1)
+            .unwrap();
+        clock.set_clock_enabled(si5351::ClockOutput::Clk1, true);
+
+        info!("phase offset {}", clk1_phase_offset);
+        clk1_phase_offset += 10;
+        if clk1_phase_offset > 100 {
+            clk1_phase_offset = 0;
+        }
+
+        // info!("on!");
         led_pin.set_high().unwrap();
         delay.delay_ms(500);
-        info!("off!");
+        // info!("off!");
         led_pin.set_low().unwrap();
         delay.delay_ms(500);
     }
 }
-
-// End of file
